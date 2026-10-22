@@ -153,6 +153,17 @@ func TestNetNewsWireFlow(t *testing.T) {
 	}
 	c.token = strings.TrimSpace(c.ok(http.MethodGet, "/reader/api/0/token", nil))
 
+	// A fresh account already has a folder; NetNewsWire can't add feeds without one.
+	var tags struct{ Tags []tagJSON }
+	c.json(http.MethodGet, "/reader/api/0/tag/list", url.Values{"output": {"json"}}, &tags)
+	if len(tags.Tags) != 2 || tags.Tags[1].ID != "user/-/label/Uncategorized" || tags.Tags[1].Type != "folder" {
+		t.Fatalf("initial tags: %+v", tags)
+	}
+	if status, _, _ := c.do(http.MethodPost, "/reader/api/0/disable-tag",
+		url.Values{"T": {c.token}, "s": {"user/-/label/Uncategorized"}}); status != http.StatusBadRequest {
+		t.Fatalf("delete default folder: status %d", status)
+	}
+
 	// Write calls need the T token.
 	if status, header, _ := c.do(http.MethodPost, "/reader/api/0/edit-tag", url.Values{"T": {"x"}}); status != http.StatusUnauthorized || header.Get("Google-Bad-Token") != "true" {
 		t.Fatalf("bad token: status %d", status)
@@ -182,9 +193,8 @@ func TestNetNewsWireFlow(t *testing.T) {
 		t.Fatalf("subscriptions: %+v", subs)
 	}
 
-	var tags struct{ Tags []tagJSON }
 	c.json(http.MethodGet, "/reader/api/0/tag/list", url.Values{"output": {"json"}}, &tags)
-	if len(tags.Tags) != 2 || tags.Tags[1].ID != "user/-/label/Tech" || tags.Tags[1].Type != "folder" {
+	if len(tags.Tags) != 3 || tags.Tags[1].ID != "user/-/label/Tech" || tags.Tags[1].Type != "folder" {
 		t.Fatalf("tags: %+v", tags)
 	}
 
@@ -244,6 +254,12 @@ func TestNetNewsWireFlow(t *testing.T) {
 	c.write("/reader/api/0/rename-tag", url.Values{"s": {"user/-/label/Tech"}, "dest": {"user/-/label/News"}})
 	if ids := c.ids(url.Values{"s": {"user/-/label/News"}}); len(ids) != 3 {
 		t.Fatalf("folder stream: %v", ids)
+	}
+
+	// Deleting a folder moves its feeds back to the default folder.
+	c.write("/reader/api/0/disable-tag", url.Values{"s": {"user/-/label/News"}})
+	if ids := c.ids(url.Values{"s": {"user/-/label/Uncategorized"}}); len(ids) != 3 {
+		t.Fatalf("default folder after delete: %v", ids)
 	}
 
 	if opml := c.ok(http.MethodGet, "/reader/api/0/subscription/export", nil); !strings.Contains(opml, `xmlUrl="`+origin.URL+`/feed.xml"`) {

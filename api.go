@@ -344,7 +344,12 @@ func (a *API) disableTag(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
-		if err := a.store.DeleteFolder(r.Context(), name); err != nil {
+		err := a.store.DeleteFolder(r.Context(), name)
+		if errors.Is(err, errDefaultFolderLock) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err != nil {
 			a.serverError(w, err)
 			return
 		}

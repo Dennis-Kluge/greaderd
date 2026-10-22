@@ -28,6 +28,10 @@ Konto hinzufügen → **FreshRSS** → API-URL `http://<host>:8080/api/greader.p
 (oder einfach `http://<host>:8080`), Benutzer und Passwort wie oben.
 
 Feeds können in NetNewsWire hinzugefügt oder per OPML importiert werden.
+Wie bei FreshRSS liegt jeder Feed in einem Ordner: NetNewsWire erlaubt beim
+FreshRSS-Kontotyp keine Feeds auf oberster Ebene. Es gibt deshalb immer den
+Ordner `Uncategorized` (umbenennbar, nicht löschbar); gelöschte Ordner geben
+ihre Feeds dorthin ab.
 Beim Hinzufügen einer Website-URL wird der Feed über
 `<link rel="alternate">` gefunden.
 

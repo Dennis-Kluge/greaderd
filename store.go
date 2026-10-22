@@ -47,9 +47,19 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE INDEX IF NOT EXISTS entries_unread  ON entries (is_read, id);
 CREATE INDEX IF NOT EXISTS entries_starred ON entries (is_starred, id);
 CREATE INDEX IF NOT EXISTS entries_crawled ON entries (crawled_usec);
+
+-- Like FreshRSS, every feed lives in a folder; NetNewsWire's FreshRSS
+-- account refuses feeds at the root.
+INSERT OR IGNORE INTO folders (id, name) VALUES (1, 'Uncategorized');
+UPDATE feeds SET folder_id = 1 WHERE folder_id IS NULL;
 `
 
-var errNotFound = errors.New("not found")
+const defaultFolderID = 1
+
+var (
+	errNotFound          = errors.New("not found")
+	errDefaultFolderLock = errors.New("the default folder cannot be deleted")
+)
 
 type Store struct {
 	db *sql.DB
@@ -181,6 +191,17 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
 		}
 	case err != nil:
 		return err
+	case fromID == defaultFolderID:
+		// Merge into the default folder so it survives.
+		if _, err := tx.ExecContext(ctx, `UPDATE feeds SET folder_id = ? WHERE folder_id = ?`, fromID, toID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM folders WHERE id = ?`, toID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE folders SET name = ? WHERE id = ?`, to, fromID); err != nil {
+			return err
+		}
 	default:
 		if _, err := tx.ExecContext(ctx, `UPDATE feeds SET folder_id = ? WHERE folder_id = ?`, toID, fromID); err != nil {
 			return err
@@ -192,10 +213,32 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
 	return tx.Commit()
 }
 
-// DeleteFolder removes a folder; its feeds stay subscribed without a folder.
+// DeleteFolder removes a folder; its feeds move to the default folder.
 func (s *Store) DeleteFolder(ctx context.Context, name string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM folders WHERE name = ?`, name)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var id int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM folders WHERE name = ?`, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if id == defaultFolderID {
+		return errDefaultFolderLock
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE feeds SET folder_id = ? WHERE folder_id = ?`, defaultFolderID, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM folders WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // --- feeds ---
@@ -254,7 +297,7 @@ func (s *Store) feedWhere(ctx context.Context, cond string, arg any) (Feed, erro
 
 // AddFeed subscribes to url. It returns the existing feed when already subscribed.
 func (s *Store) AddFeed(ctx context.Context, url string) (Feed, bool, error) {
-	res, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO feeds (url) VALUES (?)`, url)
+	res, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO feeds (url, folder_id) VALUES (?, ?)`, url, defaultFolderID)
 	if err != nil {
 		return Feed{}, false, err
 	}
@@ -273,10 +316,10 @@ func (s *Store) SetFeedTitle(ctx context.Context, id int64, title string) error 
 	return err
 }
 
-// SetFeedFolder moves a feed into folder; an empty name removes it from its folder.
+// SetFeedFolder moves a feed into folder; an empty name moves it to the default folder.
 func (s *Store) SetFeedFolder(ctx context.Context, id int64, folder string) error {
 	if folder == "" {
-		_, err := s.db.ExecContext(ctx, `UPDATE feeds SET folder_id = NULL WHERE id = ?`, id)
+		_, err := s.db.ExecContext(ctx, `UPDATE feeds SET folder_id = ? WHERE id = ?`, defaultFolderID, id)
 		return err
 	}
 	folderID, err := s.EnsureFolder(ctx, folder)
