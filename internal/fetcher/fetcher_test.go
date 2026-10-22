@@ -41,8 +41,12 @@ func (s *fakeStore) MarkFetched(_ context.Context, _ int64, _ time.Time, fetchEr
 	return s.markErr
 }
 
+// newTestFetcher allows private networks because httptest listens on loopback.
 func newTestFetcher(s Store) *Fetcher {
-	return New(s, Options{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	return New(s, Options{
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AllowPrivateNetworks: true,
+	})
 }
 
 func TestRefresh(t *testing.T) {

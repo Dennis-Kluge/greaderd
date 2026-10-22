@@ -1,0 +1,42 @@
+# greaderd behind Caddy, which obtains and renews a TLS certificate.
+#
+#   cp .env.example .env   # then edit it
+#   docker compose up -d --build
+
+services:
+  greaderd:
+    build: ..
+    restart: unless-stopped
+    environment:
+      GREADERD_USER: ${GREADERD_USER:?set GREADERD_USER in .env}
+      GREADERD_PASSWORD: ${GREADERD_PASSWORD:?set GREADERD_PASSWORD in .env}
+      GREADERD_REFRESH_INTERVAL: ${GREADERD_REFRESH_INTERVAL:-15m}
+      # Caddy is the only client and appends the real address to X-Forwarded-For.
+      GREADERD_TRUST_PROXY_HEADERS: "true"
+    volumes:
+      - greaderd-data:/data
+    # Not published: only Caddy talks to greaderd.
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      greaderd:
+        condition: service_healthy
+    environment:
+      GREADERD_DOMAIN: ${GREADERD_DOMAIN:?set GREADERD_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  greaderd-data:
+  caddy-data:
+  caddy-config:

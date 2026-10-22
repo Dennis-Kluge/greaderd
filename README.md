@@ -21,11 +21,48 @@ GREADERD_USER=dennis GREADERD_PASSWORD=secret go run ./cmd/greaderd
 | `GREADERD_ADDR` | `:8080` | Listen address |
 | `GREADERD_DB` | `greaderd.db` | Path to the SQLite database |
 | `GREADERD_REFRESH_INTERVAL` | `15m` | Time between two refreshes of a feed |
+| `GREADERD_TRUST_PROXY_HEADERS` | `false` | Take the client address from `X-Forwarded-For`; enable only behind a reverse proxy |
+| `GREADERD_ALLOW_PRIVATE_FEEDS` | `false` | Allow feeds on loopback and private networks |
+
+## Deployment
+
+greaderd has no TLS of its own. `deploy/` contains a Docker Compose setup that
+puts it behind [Caddy](https://caddyserver.com), which obtains and renews a
+certificate automatically:
+
+```bash
+cd deploy
+cp .env.example .env   # set GREADERD_DOMAIN, GREADERD_USER, GREADERD_PASSWORD
+docker compose up -d --build
+```
+
+The domain's DNS record must point to the server, and ports 80 and 443 must be
+reachable. The database lives in the `greaderd-data` volume; back up
+`/data/greaderd.db` from it.
+
+The image is also usable on its own: it is a static binary on distroless,
+runs as a non-root user, stores data in `/data` and checks its health with
+`greaderd healthcheck`.
+
+### Security
+
+- **Feeds on private networks are refused.** Otherwise anyone who can add a
+  feed could make the server fetch internal services such as cloud metadata
+  endpoints (SSRF). The check applies to every connection, including redirects.
+  Set `GREADERD_ALLOW_PRIVATE_FEEDS=true` for a local installation that should
+  read feeds from your own network.
+- **Failed logins are rate limited:** after 5 failures within 15 minutes a
+  client gets `429 Too Many Requests` until the window ends. Behind a proxy,
+  `GREADERD_TRUST_PROXY_HEADERS=true` is required so that clients are told
+  apart (the Compose setup sets it). Synced clients are unaffected, since they
+  keep their token and only log in again when it stops working.
+- `GET /healthz` needs no authentication and only reports whether the
+  database answers; the Caddyfile hides it from the internet.
 
 ## NetNewsWire
 
-Add account → **FreshRSS** → API URL `http://<host>:8080/api/greader.php`
-(or just `http://<host>:8080`), with the username and password from above.
+Add account → **FreshRSS** → API URL `https://<domain>/api/greader.php`
+(or `http://localhost:8080` locally), with the username and password from above.
 
 Feeds can be added in NetNewsWire or imported via OPML.
 As in FreshRSS, every feed lives in a folder: NetNewsWire does not allow feeds
@@ -61,19 +98,23 @@ All paths are served under both `/` and `/api/greader.php/`.
 All endpoints except ClientLogin require `Authorization: GoogleLogin auth=<Auth>`;
 all POST endpoints except the OPML import additionally require `T`.
 
+`GET /healthz` (root only) answers `ok` while the database is reachable.
+
 ## Intentionally left out (prototype)
 
 - `stream/contents` (not needed by NetNewsWire, but by other clients such as Reeder)
 - HTML sanitizing of article content
 - Pruning old articles, favicons, WebSub
 - Multiple users, multiple folders per feed
-- No TLS – run it behind a reverse proxy (Caddy or similar)
 
 ## Tests
 
 ```bash
 go test -race ./...
 ```
+
+GitHub Actions runs gofmt, `go vet`, staticcheck and the tests on every push
+and pull request, and builds the Docker image and checks its health.
 
 `AGENTS.md` describes the package layout and the conventions the code follows.
 

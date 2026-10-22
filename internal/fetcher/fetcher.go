@@ -47,7 +47,12 @@ type Options struct {
 	Interval time.Duration
 	// Workers is the number of feeds fetched concurrently (default 4).
 	Workers int
-	// Client performs the HTTP requests (default: a client with a 30s timeout).
+	// AllowPrivateNetworks permits feeds on loopback, private and other
+	// non-public addresses. Leave it off when greaderd is reachable from the
+	// internet; see ErrForbiddenAddress.
+	AllowPrivateNetworks bool
+	// Client performs the HTTP requests. The default has a 30s timeout and
+	// enforces AllowPrivateNetworks; a custom client must do so itself.
 	Client *http.Client
 	// Logger receives refresh results (default: slog.Default()).
 	Logger *slog.Logger
@@ -72,7 +77,7 @@ func New(s Store, opts Options) *Fetcher {
 		log:      opts.Logger,
 	}
 	if f.client == nil {
-		f.client = &http.Client{Timeout: defaultTimeout}
+		f.client = newClient(opts.AllowPrivateNetworks)
 	}
 	if f.interval <= 0 {
 		f.interval = defaultInterval

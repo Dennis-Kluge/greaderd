@@ -1,0 +1,7 @@
+.git
+.github
+deploy
+*.db
+*.db-shm
+*.db-wal
+/greaderd

@@ -77,10 +77,15 @@ func writeBody(w http.ResponseWriter, b []byte) {
 	_, _ = w.Write(b)
 }
 
-// logRequests logs method, path, status and duration of every request. It
-// never logs query strings or bodies, which may carry credentials.
+// logRequests logs method, path, status and duration of every request except
+// health checks, which would drown everything else. It never logs query
+// strings or bodies, which may carry credentials.
 func (s *Server) logRequests(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == healthPath {
+			h.ServeHTTP(w, r)
+			return
+		}
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		h.ServeHTTP(rec, r)

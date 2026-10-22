@@ -59,6 +59,14 @@ func dsn(path string) string {
 	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 }
 
+// Ping checks that the database can be reached.
+func (s *Store) Ping(ctx context.Context) error {
+	if err := s.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping database: %w", err)
+	}
+	return nil
+}
+
 // Close closes the database.
 func (s *Store) Close() error {
 	return s.db.Close()

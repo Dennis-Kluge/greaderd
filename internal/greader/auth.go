@@ -6,7 +6,9 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -53,7 +55,14 @@ func (s *Server) requireWriteToken(h apiFunc) apiFunc {
 
 // clientLogin handles POST /accounts/ClientLogin with the form fields Email
 // and Passwd. The Auth value of the response authenticates later requests.
+// Clients with too many failed attempts get 429 until their window expires.
 func (s *Server) clientLogin(w http.ResponseWriter, r *http.Request) error {
+	client := clientIP(r, s.trustProxy)
+	if wait, blocked := s.logins.blocked(client); blocked {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		return errorf(http.StatusTooManyRequests, "Error=TooManyAttempts")
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	if err := r.ParseForm(); err != nil {
 		return errorf(http.StatusBadRequest, "invalid form: %v", err)
@@ -62,8 +71,11 @@ func (s *Server) clientLogin(w http.ResponseWriter, r *http.Request) error {
 	userOK := secureEqual(r.PostForm.Get("Email"), s.creds.User)
 	passOK := secureEqual(r.PostForm.Get("Passwd"), s.creds.Password)
 	if !userOK || !passOK {
+		s.logins.fail(client)
+		s.log.Warn("failed login", "client", client)
 		return errorf(http.StatusUnauthorized, "Error=BadAuthentication")
 	}
+	s.logins.succeed(client)
 	writeText(w, fmt.Sprintf("SID=%s\nLSID=null\nAuth=%s\n", s.authToken, s.authToken))
 	return nil
 }

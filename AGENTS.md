@@ -24,6 +24,8 @@ When changing protocol behaviour, check both and note the reason in a comment.
 | `internal/fetcher/` | Fetching, parsing and discovering feeds; the refresh loop. |
 | `internal/greader/` | The Google Reader HTTP API: routing, auth, handlers, wire types, item ID encoding. |
 | `internal/opml/` | Parsing and rendering OPML, independent of HTTP and storage. |
+| `Dockerfile`, `deploy/` | Container image and the Compose setup with Caddy for TLS. |
+| `.github/workflows/` | CI: the checks below, plus building the image and checking its health. |
 
 Dependencies point inwards: `cmd` → `greader`/`fetcher` → `store`, and
 `greader` → `opml`. `store` and `opml` import no other internal package.
@@ -36,10 +38,21 @@ go build ./...
 go test -race ./...
 go vet ./...
 gofmt -l .        # must print nothing
-go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 ```
 
-Run all of them before committing.
+Run all of them before committing; CI runs the same set and must stay green.
+Keep the staticcheck version in sync with `.github/workflows/ci.yml`.
+
+## Security
+
+greaderd is meant to be reachable from the internet. Keep these properties:
+
+- The fetcher only connects to public addresses unless
+  `AllowPrivateNetworks` is set; never bypass its HTTP client.
+- Credentials are compared in constant time, failed logins are rate limited
+  per client, and tokens are derived from the password, never stored.
+- Unauthenticated routes are limited to `ClientLogin` and `/healthz`.
 
 ## Go conventions
 

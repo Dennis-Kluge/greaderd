@@ -1,0 +1,8 @@
+{$GREADERD_DOMAIN} {
+	encode zstd gzip
+
+	# Health checks are for the container runtime, not the internet.
+	respond /healthz 404
+
+	reverse_proxy greaderd:8080
+}

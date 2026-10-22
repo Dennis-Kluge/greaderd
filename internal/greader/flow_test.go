@@ -148,8 +148,9 @@ func newTestServer(t *testing.T) (api *httptest.Server, origin *httptest.Server)
 		}
 	})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f := fetcher.New(st, fetcher.Options{Logger: log})
-	srv := New(st, f, Credentials{User: "dennis", Password: "secret"}, log)
+	// httptest listens on loopback, which the fetcher refuses by default.
+	f := fetcher.New(st, fetcher.Options{Logger: log, AllowPrivateNetworks: true})
+	srv := New(st, f, Credentials{User: "dennis", Password: "secret"}, Options{Logger: log})
 	api = httptest.NewServer(srv.Handler())
 	t.Cleanup(api.Close)
 	return api, origin
