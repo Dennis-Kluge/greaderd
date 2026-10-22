@@ -1,4 +1,4 @@
-module github.com/dkluge/greaderd
+module github.com/Dennis-Kluge/greaderd
 
 go 1.27.1
 
