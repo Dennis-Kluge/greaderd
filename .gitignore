@@ -1,0 +1,4 @@
+/greaderd
+*.db
+*.db-wal
+*.db-shm
