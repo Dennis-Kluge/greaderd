@@ -82,6 +82,30 @@ Follow [Effective Go](https://go.dev/doc/effective_go),
 - Every goroutine has an owner that can stop it via context cancellation.
 - Tests run with `-race`.
 
+## Schema migrations
+
+The schema lives in `internal/store/migrations/`, one SQL file per version,
+embedded into the binary. `store.Open` applies the pending ones on start;
+`PRAGMA user_version` records how many have run.
+
+To change the schema:
+
+1. Add `internal/store/migrations/NNNN_short_description.sql` with the next
+   number (lower case, underscores). Numbers start at `0001` and have no gaps.
+2. Never edit, rename or delete a migration once it is committed — databases
+   in the wild have already run it. Fix mistakes with a new migration.
+3. Each migration runs in its own transaction with foreign keys disabled and
+   is rejected if it leaves a foreign key violation. For changes `ALTER TABLE`
+   cannot express, use SQLite's
+   [table rebuild procedure](https://www.sqlite.org/lang_altertable.html#otheralter):
+   create the new table, copy the rows, drop the old table, rename the new one,
+   recreate its indexes.
+4. Add a store test that opens a database at the previous version with data
+   in it and checks the data after migrating.
+
+A binary refuses to open a database whose schema version is newer than its
+own migrations, so downgrades fail loudly instead of corrupting data.
+
 ## Testing
 
 - Unit tests live next to the code (`*_test.go`) and are table-driven where there

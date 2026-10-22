@@ -36,18 +36,27 @@ type Store struct {
 // Open opens the database at path, creating it if necessary, and applies
 // pending migrations.
 func Open(ctx context.Context, path string) (*Store, error) {
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	// A single connection serialises writers and avoids SQLITE_BUSY; a single
 	// user never needs more.
 	db.SetMaxOpenConns(1)
-	if err := migrate(ctx, db); err != nil {
+	migrations, err := loadMigrations(migrationFiles, migrationDir)
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	if err := migrate(ctx, db, migrations); err != nil {
 		return nil, errors.Join(fmt.Errorf("migrate database: %w", err), db.Close())
 	}
 	return &Store{db: db}, nil
+}
+
+// dsn returns the data source name for the database file at path. The pragmas
+// apply to every new connection.
+func dsn(path string) string {
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 }
 
 // Close closes the database.
@@ -67,8 +76,13 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+// txBeginner is implemented by *sql.DB and *sql.Conn.
+type txBeginner interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
 // withTx runs fn in a transaction and commits it if fn succeeds.
-func withTx(ctx context.Context, db *sql.DB, fn func(tx *sql.Tx) error) error {
+func withTx(ctx context.Context, db txBeginner, fn func(tx *sql.Tx) error) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)

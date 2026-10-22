@@ -3,72 +3,135 @@ package store
 import (
 	"context"
 	"database/sql"
+	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
+	"path"
+	"regexp"
+	"strconv"
 )
 
-// migrations are applied in order; PRAGMA user_version records how many have
-// run. The first migration is idempotent because databases created before
-// versioning already contain its tables at user_version 0.
-var migrations = []string{
-	`
-	CREATE TABLE IF NOT EXISTS folders (
-		id   INTEGER PRIMARY KEY,
-		name TEXT NOT NULL UNIQUE
-	);
+// migrationFiles holds the schema migrations; see AGENTS.md for how to add one.
+//
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
 
-	CREATE TABLE IF NOT EXISTS feeds (
-		id              INTEGER PRIMARY KEY,
-		url             TEXT NOT NULL UNIQUE,
-		title           TEXT NOT NULL DEFAULT '',
-		site_url        TEXT NOT NULL DEFAULT '',
-		folder_id       INTEGER REFERENCES folders(id) ON DELETE SET NULL,
-		etag            TEXT NOT NULL DEFAULT '',
-		last_modified   TEXT NOT NULL DEFAULT '',
-		last_fetched_at INTEGER NOT NULL DEFAULT 0, -- unix seconds
-		last_error      TEXT NOT NULL DEFAULT ''
-	);
+const migrationDir = "migrations"
 
-	CREATE TABLE IF NOT EXISTS entries (
-		id           INTEGER PRIMARY KEY,
-		feed_id      INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
-		guid         TEXT NOT NULL,
-		title        TEXT NOT NULL DEFAULT '',
-		url          TEXT NOT NULL DEFAULT '',
-		author       TEXT NOT NULL DEFAULT '',
-		content      TEXT NOT NULL DEFAULT '',
-		published    INTEGER NOT NULL, -- unix seconds
-		crawled_usec INTEGER NOT NULL, -- unix microseconds
-		is_read      INTEGER NOT NULL DEFAULT 0,
-		is_starred   INTEGER NOT NULL DEFAULT 0,
-		UNIQUE (feed_id, guid)
-	);
+// migrationName matches "NNNN_description.sql"; NNNN is the schema version
+// the migration produces.
+var migrationName = regexp.MustCompile(`^(\d{4})_[a-z0-9_]+\.sql$`)
 
-	CREATE INDEX IF NOT EXISTS entries_unread  ON entries (is_read, id);
-	CREATE INDEX IF NOT EXISTS entries_starred ON entries (is_starred, id);
-	CREATE INDEX IF NOT EXISTS entries_crawled ON entries (crawled_usec);
-
-	INSERT OR IGNORE INTO folders (id, name) VALUES (1, 'Uncategorized');
-	UPDATE feeds SET folder_id = 1 WHERE folder_id IS NULL;
-	`,
+// migration is one schema change.
+type migration struct {
+	version int
+	name    string
+	sql     string
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
-	var version int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+// loadMigrations reads the migrations in dir. Versions must start at 1 and
+// have no gaps, so the order in which they run is unambiguous.
+func loadMigrations(fsys fs.FS, dir string) ([]migration, error) {
+	entries, err := fs.ReadDir(fsys, dir) // sorted by name
+	if err != nil {
+		return nil, fmt.Errorf("read migrations: %w", err)
+	}
+	migrations := make([]migration, 0, len(entries))
+	for _, e := range entries {
+		match := migrationName.FindStringSubmatch(e.Name())
+		if match == nil || e.IsDir() {
+			return nil, fmt.Errorf("migration %q: name must match NNNN_description.sql", e.Name())
+		}
+		version, err := strconv.Atoi(match[1])
+		if err != nil {
+			return nil, fmt.Errorf("migration %q: %w", e.Name(), err)
+		}
+		if want := len(migrations) + 1; version != want {
+			return nil, fmt.Errorf("migration %q: version %d, want %d", e.Name(), version, want)
+		}
+		body, err := fs.ReadFile(fsys, path.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("migration %q: %w", e.Name(), err)
+		}
+		migrations = append(migrations, migration{version: version, name: e.Name(), sql: string(body)})
+	}
+	return migrations, nil
+}
+
+// migrate applies the migrations newer than the database's schema version,
+// which PRAGMA user_version stores.
+//
+// Each migration runs in its own transaction, so a failing one leaves the
+// database at the previous version. Foreign keys are disabled meanwhile, as
+// SQLite's procedure for rebuilding tables requires, and checked before each
+// commit instead.
+func migrate(ctx context.Context, db *sql.DB, migrations []migration) (err error) {
+	// PRAGMAs apply per connection, so pin one.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("get connection: %w", err)
+	}
+	defer func() { err = errors.Join(err, conn.Close()) }()
+
+	var current int
+	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&current); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	for i := version; i < len(migrations); i++ {
-		err := withTx(ctx, db, func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
-				return err
-			}
-			// PRAGMA does not accept placeholders.
-			_, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, i+1))
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("apply migration %d: %w", i+1, err)
+	if current > len(migrations) {
+		return fmt.Errorf("schema version %d is newer than this build supports (%d); upgrade greaderd",
+			current, len(migrations))
+	}
+	if current == len(migrations) {
+		return nil
+	}
+
+	// foreign_keys cannot change inside a transaction.
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys: %w", err)
+	}
+	defer func() {
+		if _, enableErr := conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys = ON`); enableErr != nil {
+			err = errors.Join(err, fmt.Errorf("enable foreign keys: %w", enableErr))
+		}
+	}()
+
+	for _, m := range migrations[current:] {
+		if err := withTx(ctx, conn, func(tx *sql.Tx) error { return applyMigration(ctx, tx, m) }); err != nil {
+			return fmt.Errorf("apply migration %s: %w", m.name, err)
 		}
 	}
 	return nil
+}
+
+func applyMigration(ctx context.Context, tx *sql.Tx, m migration) error {
+	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+		return err
+	}
+	if err := checkForeignKeys(ctx, tx); err != nil {
+		return err
+	}
+	// PRAGMA does not accept placeholders.
+	_, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, m.version))
+	return err
+}
+
+// checkForeignKeys fails if any row references a missing parent.
+func checkForeignKeys(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var table, parent string
+		var rowID sql.NullInt64
+		var fkID int
+		if err := rows.Scan(&table, &rowID, &parent, &fkID); err != nil {
+			return err
+		}
+		return fmt.Errorf("foreign key violation: row %d of %s references a missing row of %s",
+			rowID.Int64, table, parent)
+	}
+	return rows.Err()
 }
