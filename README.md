@@ -11,7 +11,7 @@ FreshRSS does (`p/api/greader.php`). Built for NetNewsWire using the
 ## Running
 
 ```bash
-GREADERD_USER=dennis GREADERD_PASSWORD=secret go run .
+GREADERD_USER=dennis GREADERD_PASSWORD=secret go run ./cmd/greaderd
 ```
 
 | Variable | Default | Description |
@@ -72,8 +72,10 @@ all POST endpoints except the OPML import additionally require `T`.
 ## Tests
 
 ```bash
-go test ./...
+go test -race ./...
 ```
+
+`AGENTS.md` describes the package layout and the conventions the code follows.
 
 `TestNetNewsWireFlow` replays NetNewsWire's sync flow: login, token, adding a
 feed via discovery, setting a folder, paging through item IDs, fetching

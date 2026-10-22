@@ -17,9 +17,6 @@ When changing protocol behaviour, check both and note the reason in a comment.
 
 ## Layout
 
-The prototype started as a single `main` package. New code follows, and
-existing code is being moved into, this layout:
-
 | Path | Responsibility |
 |---|---|
 | `cmd/greaderd/` | `main`: read configuration, wire dependencies, run the server. No business logic. |
@@ -28,8 +25,9 @@ existing code is being moved into, this layout:
 | `internal/greader/` | The Google Reader HTTP API: routing, auth, handlers, wire types, item ID encoding. |
 | `internal/opml/` | Parsing and rendering OPML, independent of HTTP and storage. |
 
-Dependencies point inwards: `cmd` → `greader`/`fetcher` → `store`. `store`
-imports no other internal package.
+Dependencies point inwards: `cmd` → `greader`/`fetcher` → `store`, and
+`greader` → `opml`. `store` and `opml` import no other internal package.
+`greader` and `fetcher` declare the store methods they need as interfaces.
 
 ## Commands
 
@@ -57,6 +55,8 @@ Follow [Effective Go](https://go.dev/doc/effective_go),
 
 **Errors**
 - Never discard an error. If ignoring one is deliberate, assign it to `_` and say why.
+  The one accepted exception is a deferred `Close` on read-only resources
+  (`sql.Rows`, `sql.Stmt`, HTTP response bodies), whose errors carry no information.
 - Wrap with context: `fmt.Errorf("refresh feed %d: %w", id, err)`.
 - Export sentinel errors (`store.ErrNotFound`) and match them with `errors.Is`.
 - Handle an error once: either return it or log it at a boundary (HTTP handler,
