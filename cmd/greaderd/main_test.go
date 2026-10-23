@@ -15,13 +15,14 @@ func TestLoadConfig(t *testing.T) {
 		{
 			name: "defaults",
 			env:  map[string]string{"GREADERD_USER": "u", "GREADERD_PASSWORD": "p"},
-			want: config{addr: ":8080", dbPath: "greaderd.db", refreshInterval: 15 * time.Minute},
+			want: config{addr: ":8080", dbPath: "greaderd.db", refreshInterval: 15 * time.Minute, retention: 90 * day},
 		},
 		{
 			name: "overrides",
 			env: map[string]string{
 				"GREADERD_USER": "u", "GREADERD_PASSWORD": "p",
 				"GREADERD_ADDR": "127.0.0.1:9000", "GREADERD_DB": "/tmp/x.db", "GREADERD_REFRESH_INTERVAL": "5m",
+				"GREADERD_RETENTION": "0",
 			},
 			want: config{addr: "127.0.0.1:9000", dbPath: "/tmp/x.db", refreshInterval: 5 * time.Minute},
 		},
@@ -44,7 +45,7 @@ func TestLoadConfig(t *testing.T) {
 				"GREADERD_TRUST_PROXY_HEADERS": "true", "GREADERD_ALLOW_PRIVATE_FEEDS": "1",
 			},
 			want: config{
-				addr: ":8080", dbPath: "greaderd.db", refreshInterval: 15 * time.Minute,
+				addr: ":8080", dbPath: "greaderd.db", refreshInterval: 15 * time.Minute, retention: 90 * day,
 				trustProxyHeaders: true, allowPrivateFeeds: true,
 			},
 		},
@@ -74,6 +75,32 @@ func TestLoadConfig(t *testing.T) {
 				t.Errorf("credentials = %+v", got.creds)
 			}
 		})
+	}
+}
+
+const day = 24 * time.Hour
+
+func TestParseRetention(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{in: "90d", want: 90 * day},
+		{in: "0d", want: 0},
+		{in: "0", want: 0},
+		{in: "720h", want: 30 * day},
+		{in: "1h30m", want: 90 * time.Minute},
+		{in: "-1d", wantErr: true},
+		{in: "-5h", wantErr: true},
+		{in: "d", wantErr: true},
+		{in: "forever", wantErr: true},
+	}
+	for _, tt := range tests {
+		got, err := parseRetention(tt.in)
+		if (err != nil) != tt.wantErr || got != tt.want {
+			t.Errorf("parseRetention(%q) = %v, %v", tt.in, got, err)
+		}
 	}
 }
 

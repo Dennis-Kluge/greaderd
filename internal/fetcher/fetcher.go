@@ -1,4 +1,5 @@
-// Package fetcher downloads and parses feeds and stores their new entries.
+// Package fetcher downloads and parses feeds, stores their new entries and
+// prunes old ones.
 package fetcher
 
 import (
@@ -29,22 +30,33 @@ const (
 	defaultTimeout  = 30 * time.Second
 
 	// pollInterval is how often Run looks for due feeds. It only bounds the
-	// delay before a new or due feed is fetched; each feed is still fetched
-	// at most once per Options.Interval.
+	// delay before a due feed is fetched; when a feed is due is decided per
+	// feed (see schedule.go).
 	pollInterval = time.Minute
+
+	// pruneInterval is how often Run deletes entries past the retention period.
+	pruneInterval = time.Hour
 )
 
 // Store is the persistence the Fetcher needs.
 type Store interface {
-	DueFeeds(ctx context.Context, before time.Time) ([]store.Feed, error)
+	DueFeeds(ctx context.Context, now time.Time) ([]store.Feed, error)
 	SaveFetch(ctx context.Context, feedID int64, r store.FetchResult) (int, error)
-	MarkFetched(ctx context.Context, feedID int64, at time.Time, fetchErr error) error
+	MarkNotModified(ctx context.Context, feedID int64, at, next time.Time) error
+	MarkFailed(ctx context.Context, feedID int64, at, next time.Time, fetchErr error) error
+	MoveFeed(ctx context.Context, feedID int64, url string) (bool, error)
+	PruneEntries(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 // Options configure a Fetcher. Zero values select defaults.
 type Options struct {
-	// Interval is the minimum time between two fetches of a feed (default 15m).
+	// Interval is the regular time between two fetches of a feed (default
+	// 15m). Servers can ask for longer via Cache-Control and Retry-After, and
+	// failing feeds back off exponentially, up to a day.
 	Interval time.Duration
+	// Retention is how long read, unstarred entries are kept after their
+	// feed stopped listing them. Zero keeps all entries forever.
+	Retention time.Duration
 	// Workers is the number of feeds fetched concurrently (default 4).
 	Workers int
 	// AllowPrivateNetworks permits feeds on loopback, private and other
@@ -60,21 +72,23 @@ type Options struct {
 
 // Fetcher refreshes feeds and discovers feed URLs. It is safe for concurrent use.
 type Fetcher struct {
-	store    Store
-	client   *http.Client
-	interval time.Duration
-	workers  int
-	log      *slog.Logger
+	store     Store
+	client    *http.Client
+	interval  time.Duration
+	retention time.Duration
+	workers   int
+	log       *slog.Logger
 }
 
 // New returns a Fetcher that stores results in s.
 func New(s Store, opts Options) *Fetcher {
 	f := &Fetcher{
-		store:    s,
-		client:   opts.Client,
-		interval: opts.Interval,
-		workers:  opts.Workers,
-		log:      opts.Logger,
+		store:     s,
+		client:    opts.Client,
+		interval:  opts.Interval,
+		retention: opts.Retention,
+		workers:   opts.Workers,
+		log:       opts.Logger,
 	}
 	if f.client == nil {
 		f.client = newClient(opts.AllowPrivateNetworks)
@@ -91,13 +105,19 @@ func New(s Store, opts Options) *Fetcher {
 	return f
 }
 
-// Run refreshes due feeds until ctx is cancelled. Failures are logged, not
-// returned, so one broken feed does not stop the others.
+// Run refreshes due feeds and prunes old entries until ctx is cancelled.
+// Failures are logged, not returned, so one broken feed does not stop the
+// others.
 func (f *Fetcher) Run(ctx context.Context) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	var lastPrune time.Time
 	for {
 		f.refreshDue(ctx)
+		if f.retention > 0 && time.Since(lastPrune) >= pruneInterval {
+			f.prune(ctx)
+			lastPrune = time.Now()
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -107,7 +127,7 @@ func (f *Fetcher) Run(ctx context.Context) {
 }
 
 func (f *Fetcher) refreshDue(ctx context.Context) {
-	feeds, err := f.store.DueFeeds(ctx, time.Now().Add(-f.interval))
+	feeds, err := f.store.DueFeeds(ctx, time.Now())
 	if err != nil {
 		if ctx.Err() == nil {
 			f.log.Error("list due feeds", "err", err)
@@ -121,25 +141,52 @@ func (f *Fetcher) refreshDue(ctx context.Context) {
 		wg.Go(func() {
 			defer func() { <-sem }()
 			if err := f.Refresh(ctx, feed); err != nil && ctx.Err() == nil {
-				f.log.Warn("refresh feed", "feed", feed.ID, "url", feed.URL, "err", err)
+				f.log.Warn("refresh feed", "feed", feed.ID, "url", feed.URL,
+					"failures", feed.ErrorCount+1, "err", err)
 			}
 		})
 	}
 	wg.Wait()
 }
 
-// Refresh fetches one feed and stores its new entries. A failed fetch is
-// recorded as well, so the feed waits a full interval before the next attempt.
+// prune deletes entries past the retention period.
+func (f *Fetcher) prune(ctx context.Context) {
+	n, err := f.store.PruneEntries(ctx, time.Now().Add(-f.retention))
+	if err != nil {
+		if ctx.Err() == nil {
+			f.log.Error("prune entries", "err", err)
+		}
+		return
+	}
+	if n > 0 {
+		f.log.Info("pruned entries", "count", n)
+	}
+}
+
+// Refresh fetches one feed, stores its new entries and schedules its next
+// fetch. Failures are recorded too, so the feed backs off before the next
+// attempt.
 func (f *Fetcher) Refresh(ctx context.Context, feed store.Feed) error {
 	now := time.Now()
-	result, err := f.fetch(ctx, feed, now)
+	resp, err := f.get(ctx, feed.URL, feed.ETag, feed.LastModified)
+	if err == nil && resp.movedTo != "" {
+		f.move(ctx, feed, resp.movedTo)
+	}
+	var result *store.FetchResult
+	if err == nil && !resp.notModified {
+		result, err = parse(resp, now)
+	}
 	if err != nil {
-		markErr := f.store.MarkFetched(ctx, feed.ID, now, err)
+		next := now.Add(failureDelay(f.interval, feed.ErrorCount+1, retryAfterOf(err)))
+		markErr := f.store.MarkFailed(ctx, feed.ID, now, next, err)
 		return errors.Join(fmt.Errorf("refresh feed %d: %w", feed.ID, err), markErr)
 	}
-	if result == nil {
-		return f.store.MarkFetched(ctx, feed.ID, now, nil)
+
+	next := now.Add(successDelay(f.interval, resp.maxAge))
+	if resp.notModified {
+		return f.store.MarkNotModified(ctx, feed.ID, now, next)
 	}
+	result.NextFetchAt = next
 	n, err := f.store.SaveFetch(ctx, feed.ID, *result)
 	if err != nil {
 		return err
@@ -150,20 +197,28 @@ func (f *Fetcher) Refresh(ctx context.Context, feed store.Feed) error {
 	return nil
 }
 
-// fetch downloads and parses feed. It returns nil if the feed was not modified.
-func (f *Fetcher) fetch(ctx context.Context, feed store.Feed, now time.Time) (*store.FetchResult, error) {
-	resp, err := f.get(ctx, feed.URL, feed.ETag, feed.LastModified)
-	if err != nil {
-		return nil, err
+// move follows a permanent redirect by updating the feed's URL. A failure is
+// only logged: the fetch itself succeeded, and the redirect is seen again
+// next time.
+func (f *Fetcher) move(ctx context.Context, feed store.Feed, to string) {
+	moved, err := f.store.MoveFeed(ctx, feed.ID, to)
+	switch {
+	case err != nil:
+		f.log.Warn("move feed", "feed", feed.ID, "from", feed.URL, "to", to, "err", err)
+	case moved:
+		f.log.Info("feed moved permanently", "feed", feed.ID, "from", feed.URL, "to", to)
+	default:
+		f.log.Info("feed moved to a URL that is already subscribed; keeping both",
+			"feed", feed.ID, "from", feed.URL, "to", to)
 	}
-	if resp.notModified {
-		return nil, nil
-	}
+}
+
+// parse turns a response body into a FetchResult.
+func parse(resp response, now time.Time) (*store.FetchResult, error) {
 	parsed, err := gofeed.NewParser().Parse(bytes.NewReader(resp.body))
 	if err != nil {
 		return nil, fmt.Errorf("parse feed: %w", err)
 	}
-
 	result := &store.FetchResult{
 		FetchedAt:    now,
 		ETag:         resp.etag,
@@ -173,7 +228,7 @@ func (f *Fetcher) fetch(ctx context.Context, feed store.Feed, now time.Time) (*s
 	}
 	// Clients derive favicons from the site URL; fall back to the feed's origin.
 	if result.SiteURL == "" {
-		if u, err := url.Parse(feed.URL); err == nil {
+		if u, err := url.Parse(resp.url); err == nil {
 			result.SiteURL = u.Scheme + "://" + u.Host + "/"
 		}
 	}
@@ -219,11 +274,38 @@ func entryFromItem(it *gofeed.Item, crawled time.Time) store.Entry {
 	}
 }
 
+// response is the part of an HTTP response the fetcher uses.
 type response struct {
+	url          string // after redirects
 	body         []byte
 	etag         string
 	lastModified string
 	notModified  bool
+	// maxAge is the Cache-Control max-age, or 0.
+	maxAge time.Duration
+	// movedTo is the new URL if the feed redirected permanently, or "".
+	movedTo string
+}
+
+// httpStatusError is an unexpected HTTP status, with the delay the server
+// asked for in Retry-After, if any.
+type httpStatusError struct {
+	url        string
+	status     string
+	retryAfter time.Duration
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("GET %s: unexpected status %s", e.url, e.status)
+}
+
+// retryAfterOf returns the Retry-After delay carried by err, or 0.
+func retryAfterOf(err error) time.Duration {
+	var se *httpStatusError
+	if errors.As(err, &se) {
+		return se.retryAfter
+	}
+	return 0
 }
 
 // get performs a conditional GET and reads at most maxFeedBytes of the body.
@@ -245,19 +327,44 @@ func (f *Fetcher) get(ctx context.Context, rawURL, etag, lastModified string) (r
 	}
 	defer resp.Body.Close()
 
+	r := response{
+		url:     resp.Request.URL.String(),
+		maxAge:  cacheMaxAge(resp.Header),
+		movedTo: permanentRedirect(resp),
+	}
 	switch {
 	case resp.StatusCode == http.StatusNotModified:
-		return response{notModified: true}, nil
+		r.notModified = true
+		return r, nil
 	case resp.StatusCode >= 300:
-		return response{}, fmt.Errorf("GET %s: unexpected status %s", rawURL, resp.Status)
+		return response{}, &httpStatusError{
+			url:        rawURL,
+			status:     resp.Status,
+			retryAfter: retryAfter(resp.Header, time.Now()),
+		}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes))
-	if err != nil {
+	if r.body, err = io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes)); err != nil {
 		return response{}, fmt.Errorf("GET %s: read body: %w", rawURL, err)
 	}
-	return response{
-		body:         body,
-		etag:         resp.Header.Get("ETag"),
-		lastModified: resp.Header.Get("Last-Modified"),
-	}, nil
+	r.etag = resp.Header.Get("ETag")
+	r.lastModified = resp.Header.Get("Last-Modified")
+	return r, nil
+}
+
+// permanentRedirect returns the final URL of resp if every redirect that led
+// there was permanent (301 or 308), and "" otherwise. A temporary redirect
+// anywhere in the chain means the original URL is still the one to use.
+func permanentRedirect(resp *http.Response) string {
+	final := resp.Request
+	if final == nil || final.Response == nil {
+		return ""
+	}
+	for req := final; req.Response != nil; req = req.Response.Request {
+		switch req.Response.StatusCode {
+		case http.StatusMovedPermanently, http.StatusPermanentRedirect:
+		default:
+			return ""
+		}
+	}
+	return final.URL.String()
 }

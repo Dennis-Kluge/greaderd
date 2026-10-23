@@ -6,7 +6,9 @@ FreshRSS does (`p/api/greader.php`). Built for NetNewsWire using the
 
 - Single Go binary, SQLite (`modernc.org/sqlite`, no cgo), feeds parsed with `gofeed`
 - One user, configured via environment variables
-- Feeds are refreshed every 15 minutes (with ETag/Last-Modified)
+- Feeds are refreshed every 15 minutes, politely: conditional requests,
+  `Cache-Control`, `Retry-After` and backoff for broken feeds
+- Old read entries are pruned automatically
 
 ## Running
 
@@ -20,9 +22,37 @@ GREADERD_USER=dennis GREADERD_PASSWORD=secret go run ./cmd/greaderd
 | `GREADERD_PASSWORD` | – (required) | Password for ClientLogin |
 | `GREADERD_ADDR` | `:8080` | Listen address |
 | `GREADERD_DB` | `greaderd.db` | Path to the SQLite database |
-| `GREADERD_REFRESH_INTERVAL` | `15m` | Time between two refreshes of a feed |
+| `GREADERD_REFRESH_INTERVAL` | `15m` | Regular time between two refreshes of a feed |
+| `GREADERD_RETENTION` | `90d` | How long read entries are kept after their feed dropped them (`90d`, `720h`; `0` keeps everything) |
 | `GREADERD_TRUST_PROXY_HEADERS` | `false` | Take the client address from `X-Forwarded-For`; enable only behind a reverse proxy |
 | `GREADERD_ALLOW_PRIVATE_FEEDS` | `false` | Allow feeds on loopback and private networks |
+
+## Fetching
+
+Each feed is scheduled on its own:
+
+- **Regularly** every `GREADERD_REFRESH_INTERVAL`, with conditional requests
+  (`ETag`, `Last-Modified`).
+- **Less often** if the server's `Cache-Control: max-age` says the feed will
+  not change sooner. Feeds are never fetched more often than the interval.
+- **With backoff** when fetching fails: the delay doubles with every
+  consecutive failure (15m, 30m, 1h, …) and honours `Retry-After` on
+  `429`/`503`. The first success resets it.
+- **At least once a day**, however long the server asks us to wait or however
+  often a feed failed, so a recovered feed is back within a day.
+
+When a feed redirects permanently (`301`/`308` all the way), greaderd stores
+the new URL. Temporary redirects are followed but not stored.
+
+### Retention
+
+Every hour, greaderd deletes entries that are **read, not starred, and no
+longer in their feed** for longer than `GREADERD_RETENTION`. Entries still
+listed by the feed are kept however old they are; otherwise the next fetch
+would add them again as unread. Unread and starred entries are never deleted.
+
+SQLite reuses the freed space but does not shrink the file; run
+`sqlite3 greaderd.db VACUUM` while greaderd is stopped to do that.
 
 ## Deployment
 
@@ -104,7 +134,7 @@ all POST endpoints except the OPML import additionally require `T`.
 
 - `stream/contents` (not needed by NetNewsWire, but by other clients such as Reeder)
 - HTML sanitizing of article content
-- Pruning old articles, favicons, WebSub
+- Favicons, WebSub
 - Multiple users, multiple folders per feed
 
 ## Tests

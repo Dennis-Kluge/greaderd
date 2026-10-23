@@ -186,7 +186,9 @@ func TestNotFound(t *testing.T) {
 		{"SetFeedTitle", func() error { return s.SetFeedTitle(ctx, 99, "t") }},
 		{"SetFeedFolder", func() error { return s.SetFeedFolder(ctx, 99, "x") }},
 		{"RenameFolder", func() error { return s.RenameFolder(ctx, "nope", "x") }},
-		{"MarkFetched", func() error { return s.MarkFetched(ctx, 99, time.Now(), nil) }},
+		{"MarkNotModified", func() error { return s.MarkNotModified(ctx, 99, time.Now(), time.Now()) }},
+		{"MarkFailed", func() error { return s.MarkFailed(ctx, 99, time.Now(), time.Now(), errors.New("x")) }},
+		{"MoveFeed", func() error { _, err := s.MoveFeed(ctx, 99, "https://x.example/"); return err }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -11,6 +11,7 @@ services:
       GREADERD_USER: ${GREADERD_USER:?set GREADERD_USER in .env}
       GREADERD_PASSWORD: ${GREADERD_PASSWORD:?set GREADERD_PASSWORD in .env}
       GREADERD_REFRESH_INTERVAL: ${GREADERD_REFRESH_INTERVAL:-15m}
+      GREADERD_RETENTION: ${GREADERD_RETENTION:-90d}
       # Caddy is the only client and appends the real address to X-Forwarded-For.
       GREADERD_TRUST_PROXY_HEADERS: "true"
     volumes:

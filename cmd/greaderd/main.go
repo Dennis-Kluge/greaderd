@@ -13,6 +13,8 @@
 //	GREADERD_ADDR                 listen address (default ":8080")
 //	GREADERD_DB                   path to the SQLite database (default "greaderd.db")
 //	GREADERD_REFRESH_INTERVAL     time between two fetches of a feed (default "15m")
+//	GREADERD_RETENTION            keep read entries this long after their feed dropped them,
+//	                              e.g. "90d" or "720h"; "0" keeps them forever (default "90d")
 //	GREADERD_TRUST_PROXY_HEADERS  take client addresses from X-Forwarded-For (default false)
 //	GREADERD_ALLOW_PRIVATE_FEEDS  allow feeds on private networks (default false)
 package main
@@ -27,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -54,6 +57,7 @@ type config struct {
 	dbPath            string
 	creds             greader.Credentials
 	refreshInterval   time.Duration
+	retention         time.Duration
 	trustProxyHeaders bool
 	allowPrivateFeeds bool
 }
@@ -115,6 +119,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, errors.New("GREADERD_REFRESH_INTERVAL must be a positive duration such as 15m")
 	}
 	cfg.refreshInterval = interval
+	if cfg.retention, err = parseRetention(envOr("GREADERD_RETENTION", "90d")); err != nil {
+		return config{}, err
+	}
 	if cfg.trustProxyHeaders, err = parseBool(getenv, "GREADERD_TRUST_PROXY_HEADERS"); err != nil {
 		return config{}, err
 	}
@@ -122,6 +129,24 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	return cfg, nil
+}
+
+// parseRetention parses a duration that may also be given in days ("90d"),
+// since time.ParseDuration stops at hours. "0" disables pruning.
+func parseRetention(v string) (time.Duration, error) {
+	invalid := fmt.Errorf(`GREADERD_RETENTION must be a duration such as "90d" or "720h", or "0", not %q`, v)
+	if days, ok := strings.CutSuffix(v, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil || n < 0 {
+			return 0, invalid
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, invalid
+	}
+	return d, nil
 }
 
 // parseBool reads an optional boolean variable; unset means false.
@@ -157,6 +182,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 
 	f := fetcher.New(st, fetcher.Options{
 		Interval:             cfg.refreshInterval,
+		Retention:            cfg.retention,
 		AllowPrivateNetworks: cfg.allowPrivateFeeds,
 		Logger:               log,
 	})
@@ -174,7 +200,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
 	}
-	log.Info("listening", "addr", cfg.addr, "db", cfg.dbPath, "refresh", cfg.refreshInterval,
+	log.Info("listening", "addr", cfg.addr, "db", cfg.dbPath, "refresh", cfg.refreshInterval, "retention", cfg.retention,
 		"trust_proxy_headers", cfg.trustProxyHeaders, "allow_private_feeds", cfg.allowPrivateFeeds)
 	return serve(ctx, srv)
 }

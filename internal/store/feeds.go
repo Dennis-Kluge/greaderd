@@ -25,35 +25,35 @@ type Feed struct {
 	LastModified  string
 	LastFetchedAt time.Time
 
+	// NextFetchAt is when the feed is due; zero means now.
+	NextFetchAt time.Time
+	// ErrorCount is the number of consecutive failed fetches, and LastError
+	// the message of the latest one.
+	ErrorCount int
+	LastError  string
+
 	// Statistics, only set by Feeds.
 	Unread        int
 	NewestCrawled time.Time // zero if the feed has no entries
 }
 
-// FetchResult is the outcome of a successful fetch, written by SaveFetch.
-type FetchResult struct {
-	FetchedAt    time.Time
-	ETag         string
-	LastModified string
-	Title        string
-	SiteURL      string
-	// Entries in the order they should receive IDs, usually oldest first.
-	Entries []Entry
-}
-
 const feedColumns = `f.id, f.url, f.title, f.site_url, COALESCE(fo.name, ''),
-	f.etag, f.last_modified, f.last_fetched_at`
+	f.etag, f.last_modified, f.last_fetched_at, f.next_fetch_at, f.error_count, f.last_error`
 
 const feedSource = ` FROM feeds f LEFT JOIN folders fo ON fo.id = f.folder_id`
 
 func scanFeed(sc scanner, extra ...any) (Feed, error) {
 	var f Feed
-	var fetchedAt int64
-	dest := append([]any{&f.ID, &f.URL, &f.Title, &f.SiteURL, &f.Folder, &f.ETag, &f.LastModified, &fetchedAt}, extra...)
+	var fetchedAt, nextFetchAt int64
+	dest := append([]any{
+		&f.ID, &f.URL, &f.Title, &f.SiteURL, &f.Folder,
+		&f.ETag, &f.LastModified, &fetchedAt, &nextFetchAt, &f.ErrorCount, &f.LastError,
+	}, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return Feed{}, err
 	}
 	f.LastFetchedAt = fromUnix(fetchedAt)
+	f.NextFetchAt = fromUnix(nextFetchAt)
 	return f, nil
 }
 
@@ -155,81 +155,6 @@ func (s *Store) SetFeedFolder(ctx context.Context, id int64, folder string) erro
 	})
 	if err != nil {
 		return fmt.Errorf("move feed %d to folder %q: %w", id, folder, err)
-	}
-	return nil
-}
-
-// DueFeeds returns the feeds last fetched before the given time, least
-// recently fetched first.
-func (s *Store) DueFeeds(ctx context.Context, before time.Time) ([]Feed, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+feedColumns+feedSource+`
-		WHERE f.last_fetched_at < ? ORDER BY f.last_fetched_at`, toUnix(before))
-	if err != nil {
-		return nil, fmt.Errorf("list due feeds: %w", err)
-	}
-	feeds, err := collect(rows, func(sc scanner) (Feed, error) { return scanFeed(sc) })
-	if err != nil {
-		return nil, fmt.Errorf("list due feeds: %w", err)
-	}
-	return feeds, nil
-}
-
-// SaveFetch records a successful fetch and inserts its entries. Entries whose
-// GUID the feed already has are left untouched, so read and starred states
-// survive. It returns the number of new entries.
-func (s *Store) SaveFetch(ctx context.Context, feedID int64, r FetchResult) (int, error) {
-	inserted := 0
-	err := withTx(ctx, s.db, func(tx *sql.Tx) error {
-		// Keep a user-set title; only fill it in when empty.
-		err := execOne(ctx, tx, `
-			UPDATE feeds SET etag = ?, last_modified = ?, last_fetched_at = ?, last_error = '',
-			       title = CASE WHEN title = '' THEN ? ELSE title END,
-			       site_url = CASE WHEN ? <> '' THEN ? ELSE site_url END
-			WHERE id = ?`,
-			r.ETag, r.LastModified, toUnix(r.FetchedAt), r.Title, r.SiteURL, r.SiteURL, feedID)
-		if err != nil {
-			return err
-		}
-
-		stmt, err := tx.PrepareContext(ctx, `
-			INSERT OR IGNORE INTO entries (feed_id, guid, title, url, author, content, published, crawled_usec)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-
-		for _, e := range r.Entries {
-			res, err := stmt.ExecContext(ctx, feedID, e.GUID, e.Title, e.URL, e.Author, e.Content,
-				toUnix(e.Published), toUnixMicro(e.Crawled))
-			if err != nil {
-				return err
-			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			inserted += int(n)
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, fmt.Errorf("save fetch of feed %d: %w", feedID, err)
-	}
-	return inserted, nil
-}
-
-// MarkFetched records a fetch attempt that produced no new content, either
-// because the feed was not modified (fetchErr is nil) or because it failed.
-func (s *Store) MarkFetched(ctx context.Context, feedID int64, at time.Time, fetchErr error) error {
-	msg := ""
-	if fetchErr != nil {
-		msg = fetchErr.Error()
-	}
-	err := execOne(ctx, s.db, `UPDATE feeds SET last_fetched_at = ?, last_error = ? WHERE id = ?`,
-		toUnix(at), msg, feedID)
-	if err != nil {
-		return fmt.Errorf("mark feed %d fetched: %w", feedID, err)
 	}
 	return nil
 }
