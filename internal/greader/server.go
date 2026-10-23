@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/microcosm-cc/bluemonday"
+
 	"github.com/Dennis-Kluge/greaderd/internal/store"
 )
 
@@ -83,6 +85,7 @@ type Server struct {
 	writeToken string // value of the T parameter
 	logins     *loginLimiter
 	trustProxy bool
+	html       *bluemonday.Policy
 	log        *slog.Logger
 }
 
@@ -101,6 +104,7 @@ func New(s Store, f Fetcher, creds Credentials, opts Options) *Server {
 		writeToken: writeToken,
 		logins:     newLoginLimiter(),
 		trustProxy: opts.TrustProxyHeaders,
+		html:       newHTMLPolicy(),
 		log:        log,
 	}
 }
@@ -123,6 +127,8 @@ func (s *Server) Handler() http.Handler {
 	read("GET /reader/api/0/subscription/export", s.subscriptionExport)
 	read("GET /reader/api/0/unread-count", s.unreadCount)
 	read("GET /reader/api/0/stream/items/ids", s.streamItemIDs)
+	read("GET /reader/api/0/stream/contents", s.streamContents)
+	read("GET /reader/api/0/stream/contents/{stream...}", s.streamContents)
 	// NetNewsWire sends no T token with OPML imports.
 	read("POST /reader/api/0/subscription/import", s.subscriptionImport)
 

@@ -70,9 +70,10 @@ type itemRef struct {
 }
 
 type streamContentsResponse struct {
-	ID      string `json:"id"`
-	Updated int64  `json:"updated"` // unix seconds
-	Items   []item `json:"items"`
+	ID           string `json:"id"`
+	Updated      int64  `json:"updated"` // unix seconds
+	Items        []item `json:"items"`
+	Continuation string `json:"continuation,omitempty"` // stream/contents only
 }
 
 type item struct {

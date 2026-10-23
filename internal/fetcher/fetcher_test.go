@@ -29,6 +29,7 @@ type fakeStore struct {
 	notModified []time.Time // next fetch times
 	failed      []failure
 	moves       []string
+	icons       []string
 	prunedAt    []time.Time
 	markErr     error
 }
@@ -58,6 +59,11 @@ func (s *fakeStore) MarkFailed(_ context.Context, _ int64, _, next time.Time, er
 func (s *fakeStore) MoveFeed(_ context.Context, _ int64, url string) (bool, error) {
 	s.moves = append(s.moves, url)
 	return true, nil
+}
+
+func (s *fakeStore) SetFeedIcon(_ context.Context, _ int64, iconURL string, _ time.Time) error {
+	s.icons = append(s.icons, iconURL)
+	return nil
 }
 
 func (s *fakeStore) PruneEntries(_ context.Context, cutoff time.Time) (int64, error) {

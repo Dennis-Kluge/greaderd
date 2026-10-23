@@ -189,6 +189,7 @@ func TestNotFound(t *testing.T) {
 		{"MarkNotModified", func() error { return s.MarkNotModified(ctx, 99, time.Now(), time.Now()) }},
 		{"MarkFailed", func() error { return s.MarkFailed(ctx, 99, time.Now(), time.Now(), errors.New("x")) }},
 		{"MoveFeed", func() error { _, err := s.MoveFeed(ctx, 99, "https://x.example/"); return err }},
+		{"SetFeedIcon", func() error { return s.SetFeedIcon(ctx, 99, "", time.Now()) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

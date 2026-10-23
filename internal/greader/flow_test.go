@@ -25,7 +25,10 @@ const testRSS = `<?xml version="1.0"?>
 <item><guid>a</guid><title>First</title><link>https://example.com/1</link><pubDate>Mon, 19 Oct 2026 12:00:00 GMT</pubDate><description>one</description></item>
 </channel></rss>`
 
-const testHTML = `<html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml"></head></html>`
+const testHTML = `<html><head>
+<link rel="alternate" type="application/rss+xml" href="/feed.xml">
+<link rel="icon" href="/icon.png">
+</head></html>`
 
 // client sends requests the way NetNewsWire's ReaderAPICaller does.
 type client struct {
@@ -131,7 +134,9 @@ func newTestServer(t *testing.T) (api *httptest.Server, origin *httptest.Server)
 		switch r.URL.Path {
 		case "/feed.xml":
 			w.Header().Set("Content-Type", "application/rss+xml")
-			io.WriteString(w, testRSS)
+			// Point the feed's site at this server, so looking for its icon
+			// stays local.
+			io.WriteString(w, strings.Replace(testRSS, "<link>https://example.com/</link>", "<link>http://"+r.Host+"/</link>", 1))
 		default:
 			io.WriteString(w, testHTML)
 		}
@@ -208,7 +213,8 @@ func TestNetNewsWireFlow(t *testing.T) {
 	var subs subscriptionListResponse
 	c.json(http.MethodGet, "/reader/api/0/subscription/list", url.Values{"output": {"json"}}, &subs)
 	if len(subs.Subscriptions) != 1 || subs.Subscriptions[0].URL != origin.URL+"/feed.xml" ||
-		len(subs.Subscriptions[0].Categories) != 1 || subs.Subscriptions[0].Categories[0].Label != "Tech" {
+		len(subs.Subscriptions[0].Categories) != 1 || subs.Subscriptions[0].Categories[0].Label != "Tech" ||
+		subs.Subscriptions[0].IconURL != origin.URL+"/icon.png" {
 		t.Fatalf("subscriptions: %+v", subs)
 	}
 

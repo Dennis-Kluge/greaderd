@@ -45,6 +45,7 @@ func (s *Server) subscriptionList(w http.ResponseWriter, r *http.Request) error 
 			Categories: categories,
 			URL:        f.URL,
 			HTMLURL:    f.SiteURL,
+			IconURL:    f.IconURL,
 		})
 	}
 	return writeJSON(w, resp)

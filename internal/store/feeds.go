@@ -32,28 +32,36 @@ type Feed struct {
 	ErrorCount int
 	LastError  string
 
+	// IconURL is the site's icon, if one was found, and IconCheckedAt when
+	// it was last looked for.
+	IconURL       string
+	IconCheckedAt time.Time
+
 	// Statistics, only set by Feeds.
 	Unread        int
 	NewestCrawled time.Time // zero if the feed has no entries
 }
 
 const feedColumns = `f.id, f.url, f.title, f.site_url, COALESCE(fo.name, ''),
-	f.etag, f.last_modified, f.last_fetched_at, f.next_fetch_at, f.error_count, f.last_error`
+	f.etag, f.last_modified, f.last_fetched_at, f.next_fetch_at, f.error_count, f.last_error,
+	f.icon_url, f.icon_checked_at`
 
 const feedSource = ` FROM feeds f LEFT JOIN folders fo ON fo.id = f.folder_id`
 
 func scanFeed(sc scanner, extra ...any) (Feed, error) {
 	var f Feed
-	var fetchedAt, nextFetchAt int64
+	var fetchedAt, nextFetchAt, iconCheckedAt int64
 	dest := append([]any{
 		&f.ID, &f.URL, &f.Title, &f.SiteURL, &f.Folder,
 		&f.ETag, &f.LastModified, &fetchedAt, &nextFetchAt, &f.ErrorCount, &f.LastError,
+		&f.IconURL, &iconCheckedAt,
 	}, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return Feed{}, err
 	}
 	f.LastFetchedAt = fromUnix(fetchedAt)
 	f.NextFetchAt = fromUnix(nextFetchAt)
+	f.IconCheckedAt = fromUnix(iconCheckedAt)
 	return f, nil
 }
 

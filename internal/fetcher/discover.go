@@ -30,62 +30,86 @@ func (f *Fetcher) Discover(ctx context.Context, rawURL string) (string, error) {
 	if _, err := gofeed.NewParser().Parse(bytes.NewReader(resp.body)); err == nil {
 		return rawURL, nil
 	}
-	base, err := url.Parse(rawURL)
-	if err != nil {
-		return "", fmt.Errorf("discover feed at %s: %w", rawURL, err)
-	}
 	href := findFeedLink(resp.body)
 	if href == "" {
 		return "", fmt.Errorf("discover feed at %s: no feed found", rawURL)
 	}
-	ref, err := url.Parse(href)
+	feedURL, err := resolve(resp.url, href)
 	if err != nil {
-		return "", fmt.Errorf("discover feed at %s: invalid feed link %q: %w", rawURL, href, err)
+		return "", fmt.Errorf("discover feed at %s: %w", rawURL, err)
 	}
-	return base.ResolveReference(ref).String(), nil
+	return feedURL, nil
 }
 
-// findFeedLink returns the href of the first feed link before <body>, or ""
-// if there is none.
+// resolve resolves href relative to the page at base.
+func resolve(base, href string) (string, error) {
+	b, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	ref, err := url.Parse(href)
+	if err != nil {
+		return "", fmt.Errorf("invalid link %q: %w", href, err)
+	}
+	return b.ResolveReference(ref).String(), nil
+}
+
+// findFeedLink returns the href of the first feed link in the page's head,
+// or "" if there is none.
 func findFeedLink(page []byte) string {
+	for _, l := range headLinks(page) {
+		if hasToken(l.rel, "alternate") && feedTypes[strings.ToLower(l.typ)] {
+			return l.href
+		}
+	}
+	return ""
+}
+
+// linkTag is a <link> element with an href.
+type linkTag struct {
+	rel  string
+	typ  string
+	href string
+}
+
+// headLinks returns the <link> elements with an href before <body>.
+func headLinks(page []byte) []linkTag {
+	var links []linkTag
 	z := html.NewTokenizer(bytes.NewReader(page))
 	for {
 		switch z.Next() {
 		case html.ErrorToken:
-			return ""
+			return links
 		case html.StartTagToken, html.SelfClosingTagToken:
 			name, hasAttr := z.TagName()
 			switch string(name) {
 			case "body":
-				return ""
+				return links
 			case "link":
-				if href := feedHref(z, hasAttr); href != "" {
-					return href
+				if l := readLink(z, hasAttr); l.href != "" {
+					links = append(links, l)
 				}
 			}
 		}
 	}
 }
 
-// feedHref returns the href of the current <link> tag if it advertises a feed.
-func feedHref(z *html.Tokenizer, hasAttr bool) string {
-	var rel, typ, href string
+// readLink reads the attributes of the current <link> tag.
+func readLink(z *html.Tokenizer, hasAttr bool) linkTag {
+	var l linkTag
 	for hasAttr {
 		var key, val []byte
 		key, val, hasAttr = z.TagAttr()
 		switch string(key) {
 		case "rel":
-			rel = string(val)
+			l.rel = string(val)
 		case "type":
-			typ = string(val)
+			l.typ = strings.TrimSpace(string(val))
 		case "href":
-			href = string(val)
+			l.href = strings.TrimSpace(string(val))
 		}
 	}
-	if !hasToken(rel, "alternate") || !feedTypes[strings.ToLower(strings.TrimSpace(typ))] {
-		return ""
-	}
-	return strings.TrimSpace(href)
+	return l
 }
 
 // hasToken reports whether the space-separated list contains token, ignoring case.

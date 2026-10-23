@@ -146,6 +146,17 @@ func (s *Store) MoveFeed(ctx context.Context, feedID int64, url string) (bool, e
 	return false, nil
 }
 
+// SetFeedIcon records the result of looking for a feed's icon. iconURL is
+// stored as given, so callers pass the previous URL to keep it.
+func (s *Store) SetFeedIcon(ctx context.Context, feedID int64, iconURL string, checkedAt time.Time) error {
+	err := execOne(ctx, s.db, `UPDATE feeds SET icon_url = ?, icon_checked_at = ? WHERE id = ?`,
+		iconURL, toUnix(checkedAt), feedID)
+	if err != nil {
+		return fmt.Errorf("set icon of feed %d: %w", feedID, err)
+	}
+	return nil
+}
+
 // PruneEntries deletes read, unstarred entries that their feed last listed
 // before cutoff and that are missing from its latest content. Entries still
 // in the feed are kept however old they are; otherwise the next fetch would

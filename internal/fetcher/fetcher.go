@@ -45,6 +45,7 @@ type Store interface {
 	MarkNotModified(ctx context.Context, feedID int64, at, next time.Time) error
 	MarkFailed(ctx context.Context, feedID int64, at, next time.Time, fetchErr error) error
 	MoveFeed(ctx context.Context, feedID int64, url string) (bool, error)
+	SetFeedIcon(ctx context.Context, feedID int64, iconURL string, checkedAt time.Time) error
 	PruneEntries(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
@@ -184,7 +185,11 @@ func (f *Fetcher) Refresh(ctx context.Context, feed store.Feed) error {
 
 	next := now.Add(successDelay(f.interval, resp.maxAge))
 	if resp.notModified {
-		return f.store.MarkNotModified(ctx, feed.ID, now, next)
+		if err := f.store.MarkNotModified(ctx, feed.ID, now, next); err != nil {
+			return err
+		}
+		f.refreshIcon(ctx, feed, feed.SiteURL, now)
+		return nil
 	}
 	result.NextFetchAt = next
 	n, err := f.store.SaveFetch(ctx, feed.ID, *result)
@@ -194,6 +199,7 @@ func (f *Fetcher) Refresh(ctx context.Context, feed store.Feed) error {
 	if n > 0 {
 		f.log.Info("new entries", "feed", feed.ID, "count", n)
 	}
+	f.refreshIcon(ctx, feed, result.SiteURL, now)
 	return nil
 }
 

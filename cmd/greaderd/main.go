@@ -3,8 +3,9 @@
 //
 // Usage:
 //
-//	greaderd              run the server
-//	greaderd healthcheck  exit 0 if the server on GREADERD_ADDR is healthy
+//	greaderd                    run the server
+//	greaderd healthcheck        exit 0 if the server on GREADERD_ADDR is healthy
+//	greaderd feeds [-failing]   list feeds and their fetch status from GREADERD_DB
 //
 // It is configured through environment variables:
 //
@@ -22,6 +23,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -40,7 +42,10 @@ import (
 )
 
 const (
-	defaultAddr = ":8080"
+	defaultAddr   = ":8080"
+	defaultDBPath = "greaderd.db"
+
+	usage = "usage: greaderd [healthcheck | feeds [-failing]]"
 
 	shutdownTimeout = 10 * time.Second
 
@@ -70,15 +75,7 @@ func main() {
 func runMain(args []string) int {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if len(args) > 0 {
-		if args[0] != "healthcheck" || len(args) > 1 {
-			log.Error("usage: greaderd [healthcheck]")
-			return 2
-		}
-		if err := healthcheck(os.Getenv); err != nil {
-			log.Error("unhealthy", "err", err)
-			return 1
-		}
-		return 0
+		return runCommand(args, log)
 	}
 
 	cfg, err := loadConfig(os.Getenv)
@@ -95,6 +92,33 @@ func runMain(args []string) int {
 	return 0
 }
 
+// runCommand runs a subcommand and returns the exit code.
+func runCommand(args []string, log *slog.Logger) int {
+	switch args[0] {
+	case "healthcheck":
+		if len(args) > 1 {
+			break
+		}
+		if err := healthcheck(os.Getenv); err != nil {
+			log.Error("unhealthy", "err", err)
+			return 1
+		}
+		return 0
+	case "feeds":
+		err := runFeeds(context.Background(), os.Getenv, args[1:], os.Stdout)
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		if err != nil {
+			log.Error("feeds", "err", err)
+			return 1
+		}
+		return 0
+	}
+	log.Error(usage)
+	return 2
+}
+
 // loadConfig reads the configuration through getenv.
 func loadConfig(getenv func(string) string) (config, error) {
 	envOr := func(key, fallback string) string {
@@ -105,7 +129,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	cfg := config{
 		addr:   envOr("GREADERD_ADDR", defaultAddr),
-		dbPath: envOr("GREADERD_DB", "greaderd.db"),
+		dbPath: envOr("GREADERD_DB", defaultDBPath),
 		creds: greader.Credentials{
 			User:     getenv("GREADERD_USER"),
 			Password: getenv("GREADERD_PASSWORD"),

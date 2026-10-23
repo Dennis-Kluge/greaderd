@@ -53,6 +53,9 @@ greaderd is meant to be reachable from the internet. Keep these properties:
 - Credentials are compared in constant time, failed logins are rate limited
   per client, and tokens are derived from the password, never stored.
 - Unauthenticated routes are limited to `ClientLogin` and `/healthz`.
+- Article HTML is untrusted and goes through the bluemonday policy in
+  `internal/greader/sanitize.go` on every response that contains it. Content
+  is stored unmodified, so policy changes apply to existing entries too.
 
 ## Go conventions
 

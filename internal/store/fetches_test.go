@@ -202,3 +202,22 @@ func TestMigration2KeepsData(t *testing.T) {
 		t.Errorf("after migration: next=%d errors=%d success=%d seen=%d", nextFetch, errorCount, lastSuccess, lastSeen)
 	}
 }
+
+func TestSetFeedIcon(t *testing.T) {
+	s := openTestStore(t)
+	feed := addFeed(t, s, "https://a.example/feed", "")
+	if !feed.IconCheckedAt.IsZero() || feed.IconURL != "" {
+		t.Fatalf("new feed has icon state %+v", feed)
+	}
+	at := time.Unix(1_800_000_000, 0)
+	if err := s.SetFeedIcon(t.Context(), feed.ID, "https://a.example/icon.png", at); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.FeedByID(t.Context(), feed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IconURL != "https://a.example/icon.png" || !got.IconCheckedAt.Equal(at) {
+		t.Errorf("feed = %+v", got)
+	}
+}

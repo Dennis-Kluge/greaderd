@@ -9,6 +9,7 @@ FreshRSS does (`p/api/greader.php`). Built for NetNewsWire using the
 - Feeds are refreshed every 15 minutes, politely: conditional requests,
   `Cache-Control`, `Retry-After` and backoff for broken feeds
 - Old read entries are pruned automatically
+- Article HTML is sanitized with `bluemonday`; feeds get icons
 
 ## Running
 
@@ -103,6 +104,28 @@ folders move there.
 When adding a website URL, the feed is discovered via
 `<link rel="alternate">`.
 
+## Other clients
+
+Besides the calls NetNewsWire makes, greaderd serves `stream/contents`, which
+Reeder, ReadKit and similar clients use to load full items in one request.
+Subscriptions carry an `iconUrl`: the best icon the feed's site declares
+(Apple touch icon, then favicon) or its `/favicon.ico`, looked up weekly.
+
+Article HTML comes from third parties and is sanitized before it is sent to
+any client: scripts, styles, event handlers, forms and iframes are removed,
+except for YouTube and Vimeo embeds. Formatting, links, images and tables stay.
+
+## Checking on feeds
+
+There is no web interface; `greaderd feeds` lists the subscriptions with
+their unread count, last and next fetch and consecutive failures:
+
+```bash
+GREADERD_DB=greaderd.db greaderd feeds -failing
+```
+
+In the Compose setup: `docker compose exec greaderd /greaderd feeds`.
+
 ## Endpoints
 
 All paths are served under both `/` and `/api/greader.php/`.
@@ -121,6 +144,7 @@ All paths are served under both `/` and `/api/greader.php/`.
 | POST | `/reader/api/0/rename-tag`, `/disable-tag` | Rename/delete folders |
 | GET | `/reader/api/0/unread-count` | |
 | GET | `/reader/api/0/stream/items/ids` | `s`, `n`, `r`, `ot`, `nt`, `xt`, `it`, `c` |
+| GET | `/reader/api/0/stream/contents/<stream>` | Full items; same parameters, stream in the path or as `s` |
 | POST | `/reader/api/0/stream/items/contents` | `i` (decimal or long hex form) |
 | POST | `/reader/api/0/edit-tag` | `read`, `starred`, `kept-unread` |
 | POST | `/reader/api/0/mark-all-as-read` | `s`, `ts` (µs) |
@@ -130,12 +154,11 @@ all POST endpoints except the OPML import additionally require `T`.
 
 `GET /healthz` (root only) answers `ok` while the database is reachable.
 
-## Intentionally left out (prototype)
+## Intentionally left out
 
-- `stream/contents` (not needed by NetNewsWire, but by other clients such as Reeder)
-- HTML sanitizing of article content
-- Favicons, WebSub
 - Multiple users, multiple folders per feed
+- WebSub, full-text extraction
+- A web interface
 
 ## Tests
 

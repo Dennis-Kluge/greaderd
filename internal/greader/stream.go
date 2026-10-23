@@ -167,7 +167,7 @@ func (s *Server) streamItemContents(w http.ResponseWriter, r *http.Request) erro
 	}
 	items := make([]item, 0, len(entries))
 	for _, e := range entries {
-		items = append(items, newItem(e))
+		items = append(items, s.newItem(e))
 	}
 	return writeJSON(w, streamContentsResponse{
 		ID:      streamReadingList,
@@ -176,7 +176,64 @@ func (s *Server) streamItemContents(w http.ResponseWriter, r *http.Request) erro
 	})
 }
 
-func newItem(e store.Entry) item {
+// streamContents handles GET /reader/api/0/stream/contents/<stream>, which
+// returns a page of full items in one request. Clients such as Reeder use it
+// instead of items/ids and items/contents. Without a stream in the path, the
+// s parameter (as sent by BazQux clients) or the reading list is used.
+func (s *Server) streamContents(w http.ResponseWriter, r *http.Request) error {
+	v := r.URL.Query()
+	streamID := r.PathValue("stream")
+	if streamID == "" {
+		streamID = v.Get("s")
+	}
+	if streamID == "" {
+		streamID = streamReadingList
+	}
+	v.Set("s", streamID)
+
+	sq, err := parseStreamQuery(v)
+	if err != nil {
+		return err
+	}
+	q, found, err := s.resolve(r.Context(), sq)
+	if err != nil {
+		return err
+	}
+	resp := streamContentsResponse{ID: streamID, Updated: time.Now().Unix(), Items: []item{}}
+	if !found {
+		return writeJSON(w, resp)
+	}
+	refs, continuation, err := s.store.ItemIDs(r.Context(), q)
+	if err != nil {
+		return err
+	}
+	ids := make([]int64, len(refs))
+	for i, ref := range refs {
+		ids[i] = ref.ID
+	}
+	entries, err := s.store.Entries(r.Context(), ids)
+	if err != nil {
+		return err
+	}
+	// Entries come back newest first; keep the order the query asked for.
+	byID := make(map[int64]store.Entry, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+	for _, id := range ids {
+		if e, ok := byID[id]; ok {
+			resp.Items = append(resp.Items, s.newItem(e))
+		}
+	}
+	if continuation > 0 {
+		resp.Continuation = strconv.FormatInt(continuation, 10)
+	}
+	return writeJSON(w, resp)
+}
+
+// newItem converts an entry to its wire form, sanitizing its HTML.
+func (s *Server) newItem(e store.Entry) item {
+	html := s.html.Sanitize(e.Content)
 	categories := []string{streamReadingList}
 	if e.Folder != "" {
 		categories = append(categories, labelStreamID(e.Folder))
@@ -207,8 +264,8 @@ func newItem(e store.Entry) item {
 			Title:    e.FeedTitle,
 			HTMLURL:  e.FeedSiteURL,
 		},
-		Summary: content{Content: e.Content},
-		Content: content{Content: e.Content},
+		Summary: content{Content: html},
+		Content: content{Content: html},
 	}
 }
 
